@@ -140,6 +140,15 @@ Alone and desperate, the boy trains himself into a warrior — not through viole
 
 ---
 
+## 🎮 Playable Prototype
+A working HTML5 Canvas demo is available in [`game/index.html`](game/index.html). Play it by opening the file in any browser.
+
+**Controls:** WASD/Arrow keys to move, Space to interact (place sake / fight samurai)
+
+**Gameplay flow:** Explore forest → Find sword → Find sake → Place sake on samurai's patrol → Samurai drinks & gets drunk → Fight him → Free your sister!
+
+---
+
 ## 📋 Open Questions
 - Target platform(s)?
 - Engine (Unreal, Unity, Godot)?
