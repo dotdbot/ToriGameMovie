@@ -75,6 +75,7 @@ let victoryTimer = 0;
 let titlePulse = 0;
 let gameTime = 0;
 let isMobile = false;
+let warpTransition = { active: false, timer: 0, maxTime: 40, destX: 0, destY: 0, phase: 'out' };
 
 // ======================== MOBILE DETECTION ========================
 function detectMobile() {
@@ -277,16 +278,29 @@ function generateTrees() {
 
 function generateToriiGates() {
   toriiGates = [
-    { x: 12 * TILE, y: 10 * TILE },
-    { x: 30 * TILE, y: 20 * TILE },
-    { x: 50 * TILE, y: 15 * TILE },
-    { x: 25 * TILE, y: 40 * TILE },
-    { x: 55 * TILE, y: 40 * TILE },
-    { x: 65 * TILE, y: 45 * TILE },
-    { x: 40 * TILE, y: 35 * TILE },
+    { x: 12 * TILE, y: 10 * TILE, pair: 1 },   // 0 <-> 1
+    { x: 50 * TILE, y: 15 * TILE, pair: 0 },   // 1 <-> 0
+    { x: 30 * TILE, y: 20 * TILE, pair: 2 },   // 2 <-> 3 (but index shifted)
+    { x: 25 * TILE, y: 40 * TILE, pair: 4 },   // 3 <-> 4
+    { x: 55 * TILE, y: 40 * TILE, pair: 3 },   // 4 <-> 3 (but index shifted)
+    { x: 40 * TILE, y: 35 * TILE, pair: 5 },   // 5 <-> 6 (but index shifted)
+    { x: 65 * TILE, y: 45 * TILE, pair: 6 },   // 6 <-> 5 (but index shifted)
   ];
+  // Fix pair indices: gates are 0-6, pairs link them
+  toriiGates[0].pair = 1; toriiGates[1].pair = 0; // top-left <-> top-right
+  toriiGates[2].pair = 5; toriiGates[5].pair = 2; // center-top <-> center
+  toriiGates[3].pair = 4; toriiGates[4].pair = 3; // bottom-left <-> bottom-right
+  toriiGates[6].pair = 2; // shrine-area -> center-top (one-way back via 2->5)
+  // Actually make it simpler: circular pairs
+  toriiGates[0].pair = 3; toriiGates[3].pair = 0; // far apart
+  toriiGates[1].pair = 4; toriiGates[4].pair = 1; // far apart
+  toriiGates[2].pair = 6; toriiGates[6].pair = 2; // center <-> shrine area
+  toriiGates[5].pair = 0; // center links back to start area (bonus route)
+  
   // Remove trees near gates
   toriiGates.forEach(g => {
+    g.cooldown = 0; // teleport cooldown
+    g.warpAnim = 0; // warp visual effect timer
     trees = trees.filter(t => {
       const dx = t.x - g.x, dy = t.y - g.y;
       return Math.sqrt(dx * dx + dy * dy) > 50;
@@ -529,15 +543,51 @@ function update() {
     }
   }
 
-  // --- Torii gate proximity sound ---
-  for (const g of toriiGates) {
+  // --- Warp transition ---
+  if (warpTransition.active) {
+    warpTransition.timer++;
+    if (warpTransition.phase === 'out' && warpTransition.timer >= warpTransition.maxTime / 2) {
+      // Teleport at midpoint
+      player.x = warpTransition.destX;
+      player.y = warpTransition.destY;
+      warpTransition.phase = 'in';
+    }
+    if (warpTransition.timer >= warpTransition.maxTime) {
+      warpTransition.active = false;
+    }
+    return; // freeze all other updates during warp
+  }
+
+  // --- Torii gate teleportation ---
+  for (let i = 0; i < toriiGates.length; i++) {
+    const g = toriiGates[i];
+    if (g.cooldown > 0) { g.cooldown--; continue; }
     const dx = player.x - g.x, dy = player.y - g.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
-    if (dist < 40 && !g.passed) {
-      g.passed = true;
-      sfxGate();
+    if (dist < 25) {
+      const dest = toriiGates[g.pair];
+      if (dest && dest.cooldown <= 0) {
+        // Start warp transition
+        sfxGate();
+        warpTransition.active = true;
+        warpTransition.timer = 0;
+        warpTransition.phase = 'out';
+        warpTransition.destX = dest.x;
+        warpTransition.destY = dest.y + 35; // appear just below the destination gate
+        // Set cooldowns so you don't immediately warp back
+        g.cooldown = 90;
+        dest.cooldown = 90;
+        g.warpAnim = 30;
+        dest.warpAnim = 30;
+        showMessage('⛩️ The torii warps you through space...', 120);
+        return;
+      }
     }
-    if (dist > 80) g.passed = false;
+  }
+
+  // --- Torii gate ambient glow decay ---
+  for (const g of toriiGates) {
+    if (g.warpAnim > 0) g.warpAnim--;
   }
 
   // --- Samurai AI ---
@@ -745,11 +795,12 @@ function drawToriiGate(g) {
 
   // Glow effect
   ctx.save();
-  const glow = 0.15 + Math.sin(gameTime * 0.03 + g.x * 0.01) * 0.1;
-  ctx.globalAlpha = glow;
-  ctx.fillStyle = '#ff4444';
+  const baseGlow = 0.15 + Math.sin(gameTime * 0.03 + g.x * 0.01) * 0.1;
+  const warpGlow = g.warpAnim ? g.warpAnim / 30 * 0.6 : 0;
+  ctx.globalAlpha = baseGlow + warpGlow;
+  ctx.fillStyle = g.warpAnim > 0 ? '#ffffff' : '#ff4444';
   ctx.beginPath();
-  ctx.arc(sx, sy, 35, 0, Math.PI * 2);
+  ctx.arc(sx, sy, 35 + warpGlow * 20, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 }
@@ -1529,6 +1580,48 @@ function render() {
 
   // UI
   drawUI();
+
+  // Warp transition overlay
+  if (warpTransition.active) {
+    const t = warpTransition.timer / warpTransition.maxTime;
+    // Ink wash effect: circle wipe that closes then opens
+    const progress = warpTransition.phase === 'out' ? t * 2 : (1 - (t * 2 - 1));
+    const maxRadius = Math.sqrt(canvas.width * canvas.width + canvas.height * canvas.height) / 2;
+    const radius = maxRadius * (1 - Math.min(1, progress));
+    
+    ctx.save();
+    ctx.fillStyle = '#0a0a0a';
+    ctx.beginPath();
+    // Draw a rect with a circle cut out
+    ctx.rect(0, 0, canvas.width, canvas.height);
+    ctx.arc(canvas.width / 2, canvas.height / 2, Math.max(0, radius), 0, Math.PI * 2, true);
+    ctx.fill();
+    
+    // Ink splatters at the edge
+    if (radius > 10 && radius < maxRadius - 10) {
+      ctx.globalAlpha = 0.6;
+      for (let i = 0; i < 12; i++) {
+        const angle = (i / 12) * Math.PI * 2 + gameTime * 0.1;
+        const splashR = radius + (Math.sin(angle * 3 + gameTime * 0.2) * 15);
+        const sx = canvas.width / 2 + Math.cos(angle) * splashR;
+        const sy = canvas.height / 2 + Math.sin(angle) * splashR;
+        ctx.fillStyle = '#1a1a2e';
+        ctx.beginPath();
+        ctx.arc(sx, sy, 8 + Math.sin(i + gameTime * 0.05) * 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    
+    // Center kanji during full black
+    if (progress > 0.85) {
+      ctx.globalAlpha = (progress - 0.85) / 0.15;
+      ctx.fillStyle = '#c41e2a';
+      ctx.font = 'bold 48px serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('鳥居', canvas.width / 2, canvas.height / 2 + 15);
+    }
+    ctx.restore();
+  }
 }
 
 // ======================== GAME LOOP ========================
