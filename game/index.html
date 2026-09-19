@@ -1,0 +1,1373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TORI - 鳥居</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a0a; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; }
+canvas { display: block; image-rendering: pixelated; cursor: none; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+// ======================== SETUP ========================
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+canvas.width = 800;
+canvas.height = 600;
+
+// ======================== AUDIO ========================
+const AudioCtx = window.AudioContext || window.webkitAudioContext;
+let audioCtx = null;
+function ensureAudio() { if (!audioCtx) audioCtx = new AudioCtx(); }
+
+function playTone(freq, dur, type='square', vol=0.15, slide=0) {
+  ensureAudio();
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+  if (slide) osc.frequency.linearRampToValueAtTime(freq + slide, audioCtx.currentTime + dur);
+  gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime + dur);
+}
+
+function sfxPickup() { playTone(520, 0.1); setTimeout(() => playTone(780, 0.15), 80); }
+function sfxPlace() { playTone(300, 0.2, 'triangle'); }
+function sfxPush() { playTone(150, 0.3, 'sawtooth', 0.1); }
+function sfxDrink() { playTone(200, 0.4, 'triangle', 0.1); setTimeout(() => playTone(180, 0.3, 'triangle', 0.08), 300); }
+function sfxFight() {
+  for (let i = 0; i < 5; i++) setTimeout(() => playTone(100 + Math.random()*200, 0.1, 'sawtooth', 0.12), i * 80);
+}
+function sfxVictory() {
+  const notes = [523, 659, 784, 1047];
+  notes.forEach((n, i) => setTimeout(() => playTone(n, 0.3, 'square', 0.12), i * 150));
+}
+function sfxGate() { playTone(440, 0.5, 'sine', 0.08); playTone(554, 0.5, 'sine', 0.06); }
+
+// ======================== CONSTANTS ========================
+const TILE = 32;
+const MAP_W = 80; // tiles
+const MAP_H = 60;
+const WORLD_W = MAP_W * TILE;
+const WORLD_H = MAP_H * TILE;
+
+// ======================== GAME STATE ========================
+let gameState = 'title'; // title, playing, victory
+let player, samurai, sister, sword, sake, placedSake;
+let trees = [], toriiGates = [], fireflies = [], shrineStones = [];
+let inventory = { sword: false, sake: false };
+let messages = [];
+let msgTimer = 0;
+let camera = { x: 0, y: 0 };
+let keys = {};
+let fightAnim = 0;
+let victoryTimer = 0;
+let titlePulse = 0;
+let gameTime = 0;
+
+// ======================== MAP GENERATION ========================
+// Path map: 0=grass, 1=path, 2=clearing
+let pathMap = [];
+
+function initPathMap() {
+  pathMap = Array.from({ length: MAP_H }, () => Array(MAP_W).fill(0));
+
+  // Main paths (organic, winding)
+  const paths = [
+    // Start area to center
+    ...generateWindingPath(3, 3, 40, 30, 0.3),
+    // Center to shrine area
+    ...generateWindingPath(40, 30, 70, 50, 0.3),
+    // Branch paths
+    ...generateWindingPath(20, 15, 50, 10, 0.25),
+    ...generateWindingPath(10, 25, 35, 45, 0.25),
+    ...generateWindingPath(45, 20, 65, 35, 0.25),
+    ...generateWindingPath(30, 35, 55, 50, 0.2),
+    // Extra exploration paths
+    ...generateWindingPath(5, 40, 25, 55, 0.2),
+    ...generateWindingPath(55, 5, 70, 25, 0.2),
+  ];
+
+  paths.forEach(p => {
+    if (p.x >= 0 && p.x < MAP_W && p.y >= 0 && p.y < MAP_H) {
+      pathMap[p.y][p.x] = 1;
+      // Widen paths
+      for (let dx = -1; dx <= 1; dx++)
+        for (let dy = -1; dy <= 1; dy++) {
+          const nx = p.x + dx, ny = p.y + dy;
+          if (nx >= 0 && nx < MAP_W && ny >= 0 && ny < MAP_H && Math.random() < 0.6)
+            pathMap[ny][nx] = 1;
+        }
+    }
+  });
+
+  // Clearings
+  const clearings = [
+    { x: 5, y: 5, r: 4 },    // Start
+    { x: 68, y: 50, r: 5 },   // Shrine / samurai area
+    { x: 40, y: 28, r: 4 },   // Center
+    { x: 20, y: 45, r: 3 },   // Sword area
+    { x: 60, y: 15, r: 3 },   // Sake area
+  ];
+  clearings.forEach(c => {
+    for (let dy = -c.r; dy <= c.r; dy++)
+      for (let dx = -c.r; dx <= c.r; dx++) {
+        if (dx * dx + dy * dy <= c.r * c.r) {
+          const nx = c.x + dx, ny = c.y + dy;
+          if (nx >= 0 && nx < MAP_W && ny >= 0 && ny < MAP_H)
+            pathMap[ny][nx] = 2;
+        }
+      }
+  });
+}
+
+function generateWindingPath(x1, y1, x2, y2, wobble) {
+  const points = [];
+  let x = x1, y = y1;
+  const steps = Math.abs(x2 - x1) + Math.abs(y2 - y1);
+  for (let i = 0; i < steps * 2; i++) {
+    const dx = x2 - x, dy = y2 - y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < 1) break;
+    const nx = dx / dist, ny = dy / dist;
+    x += nx + (Math.random() - 0.5) * wobble * 3;
+    y += ny + (Math.random() - 0.5) * wobble * 3;
+    points.push({ x: Math.round(x), y: Math.round(y) });
+  }
+  return points;
+}
+
+function generateTrees() {
+  trees = [];
+  for (let y = 0; y < MAP_H; y++) {
+    for (let x = 0; x < MAP_W; x++) {
+      if (pathMap[y][x] > 0) continue;
+      // Dense forest with some gaps
+      if (Math.random() < 0.35) {
+        const wx = x * TILE + TILE / 2 + (Math.random() - 0.5) * 10;
+        const wy = y * TILE + TILE / 2 + (Math.random() - 0.5) * 10;
+        const r = 10 + Math.random() * 8;
+        const type = Math.random(); // variety
+        trees.push({ x: wx, y: wy, r, type, shade: Math.random() * 0.3 });
+      }
+    }
+  }
+}
+
+function generateToriiGates() {
+  toriiGates = [
+    { x: 12 * TILE, y: 10 * TILE },
+    { x: 30 * TILE, y: 20 * TILE },
+    { x: 50 * TILE, y: 15 * TILE },
+    { x: 25 * TILE, y: 40 * TILE },
+    { x: 55 * TILE, y: 40 * TILE },
+    { x: 65 * TILE, y: 45 * TILE },
+    { x: 40 * TILE, y: 35 * TILE },
+  ];
+  // Remove trees near gates
+  toriiGates.forEach(g => {
+    trees = trees.filter(t => {
+      const dx = t.x - g.x, dy = t.y - g.y;
+      return Math.sqrt(dx * dx + dy * dy) > 50;
+    });
+  });
+}
+
+function generateShrineStones() {
+  // Stones around the shrine area
+  const cx = 68 * TILE, cy = 50 * TILE;
+  shrineStones = [];
+  for (let i = 0; i < 8; i++) {
+    const angle = (i / 8) * Math.PI * 2;
+    const dist = 100 + Math.random() * 30;
+    shrineStones.push({
+      x: cx + Math.cos(angle) * dist,
+      y: cy + Math.sin(angle) * dist,
+      w: 8 + Math.random() * 8,
+      h: 6 + Math.random() * 6,
+    });
+  }
+}
+
+function generateFireflies() {
+  fireflies = [];
+  for (let i = 0; i < 80; i++) {
+    fireflies.push({
+      x: Math.random() * WORLD_W,
+      y: Math.random() * WORLD_H,
+      phase: Math.random() * Math.PI * 2,
+      speed: 0.3 + Math.random() * 0.5,
+      radius: 1.5 + Math.random() * 1.5,
+      drift: Math.random() * Math.PI * 2,
+    });
+  }
+}
+
+// ======================== INIT ========================
+function initGame() {
+  initPathMap();
+  generateTrees();
+  generateToriiGates();
+  generateShrineStones();
+  generateFireflies();
+
+  player = {
+    x: 5 * TILE, y: 5 * TILE,
+    w: 20, h: 20,
+    speed: 2.5,
+    dir: 0, // 0=down,1=left,2=up,3=right
+    walkFrame: 0,
+    pushTimer: 0,
+    pushDx: 0, pushDy: 0,
+    hasSword: false,
+  };
+
+  // Shrine area
+  samurai = {
+    x: 68 * TILE, y: 50 * TILE,
+    w: 24, h: 24,
+    speed: 1.2,
+    patrolPoints: [
+      { x: 65 * TILE, y: 48 * TILE },
+      { x: 71 * TILE, y: 48 * TILE },
+      { x: 71 * TILE, y: 53 * TILE },
+      { x: 65 * TILE, y: 53 * TILE },
+    ],
+    patrolIdx: 0,
+    drunk: false,
+    drinkTimer: 0,
+    drinking: false,
+    defeated: false,
+    wobble: 0,
+  };
+
+  sister = { x: 68 * TILE, y: 51 * TILE, freed: false };
+  sword = { x: 22 * TILE, y: 46 * TILE, collected: false };
+  sake = { x: 60 * TILE, y: 14 * TILE, collected: false };
+  placedSake = null;
+
+  inventory = { sword: false, sake: false };
+  messages = [];
+  msgTimer = 0;
+  fightAnim = 0;
+  victoryTimer = 0;
+  gameTime = 0;
+
+  // Remove trees near important objects
+  [player, samurai, sister, sword, sake].forEach(obj => {
+    trees = trees.filter(t => {
+      const dx = t.x - obj.x, dy = t.y - obj.y;
+      return Math.sqrt(dx * dx + dy * dy) > 50;
+    });
+  });
+}
+
+function showMessage(text, duration = 180) {
+  messages.push({ text, timer: duration, alpha: 1 });
+}
+
+// ======================== INPUT ========================
+document.addEventListener('keydown', e => {
+  keys[e.key.toLowerCase()] = true;
+  keys[e.code] = true;
+
+  if (gameState === 'title' && e.key === 'Enter') {
+    ensureAudio();
+    gameState = 'playing';
+    initGame();
+    showMessage('Find the sword and sake bottle...', 240);
+  }
+  if (gameState === 'playing' && (e.code === 'Space' || e.key === ' ')) {
+    handleAction();
+  }
+  if (gameState === 'victory' && e.key === 'Enter') {
+    gameState = 'title';
+  }
+});
+document.addEventListener('keyup', e => {
+  keys[e.key.toLowerCase()] = false;
+  keys[e.code] = false;
+});
+
+function handleAction() {
+  if (fightAnim > 0) return;
+
+  // Place sake?
+  if (inventory.sake && !placedSake) {
+    const dx = player.x - samurai.x, dy = player.y - samurai.y;
+    const distToSam = Math.sqrt(dx * dx + dy * dy);
+    if (distToSam < 300 && distToSam > 80) {
+      placedSake = { x: player.x, y: player.y };
+      inventory.sake = false;
+      sfxPlace();
+      showMessage('You placed the sake on the ground.', 150);
+      return;
+    } else if (distToSam <= 80) {
+      showMessage("Too close to the samurai! Back up a bit.", 120);
+      return;
+    } else {
+      showMessage("Place the sake closer to the samurai's patrol.", 120);
+      return;
+    }
+  }
+
+  // Fight samurai?
+  const dx2 = player.x - samurai.x, dy2 = player.y - samurai.y;
+  const distSam = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+  if (distSam < 60 && !samurai.defeated) {
+    if (inventory.sword && samurai.drunk) {
+      // FIGHT!
+      fightAnim = 60;
+      sfxFight();
+      return;
+    } else if (!inventory.sword) {
+      showMessage("The samurai pushes you back! You need a weapon.", 150);
+      sfxPush();
+      pushPlayerAway();
+    } else if (!samurai.drunk) {
+      showMessage("The samurai is too alert! Find a way to weaken him.", 150);
+      sfxPush();
+      pushPlayerAway();
+    }
+  }
+}
+
+function pushPlayerAway() {
+  const dx = player.x - samurai.x;
+  const dy = player.y - samurai.y;
+  const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+  player.pushDx = (dx / dist) * 5;
+  player.pushDy = (dy / dist) * 5;
+  player.pushTimer = 20;
+}
+
+// ======================== UPDATE ========================
+function update() {
+  if (gameState !== 'playing') return;
+  gameTime++;
+
+  // --- Player movement ---
+  let mx = 0, my = 0;
+  if (player.pushTimer > 0) {
+    player.x += player.pushDx;
+    player.y += player.pushDy;
+    player.pushTimer--;
+  } else {
+    if (keys['a'] || keys['arrowleft'])  { mx -= 1; player.dir = 1; }
+    if (keys['d'] || keys['arrowright']) { mx += 1; player.dir = 3; }
+    if (keys['w'] || keys['arrowup'])    { my -= 1; player.dir = 2; }
+    if (keys['s'] || keys['arrowdown'])  { my += 1; player.dir = 0; }
+
+    if (mx && my) { mx *= 0.707; my *= 0.707; }
+
+    const newX = player.x + mx * player.speed;
+    const newY = player.y + my * player.speed;
+
+    // Collision with trees
+    let canMoveX = true, canMoveY = true;
+    for (const t of trees) {
+      const dx = newX - t.x, dy = player.y - t.y;
+      if (Math.sqrt(dx * dx + dy * dy) < t.r + 8) canMoveX = false;
+      const dx2 = player.x - t.x, dy2 = newY - t.y;
+      if (Math.sqrt(dx2 * dx2 + dy2 * dy2) < t.r + 8) canMoveY = false;
+    }
+    // Collision with shrine stones
+    for (const s of shrineStones) {
+      if (Math.abs(newX - s.x) < s.w + 8 && Math.abs(player.y - s.y) < s.h + 8) canMoveX = false;
+      if (Math.abs(player.x - s.x) < s.w + 8 && Math.abs(newY - s.y) < s.h + 8) canMoveY = false;
+    }
+
+    if (canMoveX) player.x = newX;
+    if (canMoveY) player.y = newY;
+
+    // Bounds
+    player.x = Math.max(10, Math.min(WORLD_W - 10, player.x));
+    player.y = Math.max(10, Math.min(WORLD_H - 10, player.y));
+
+    if (mx || my) player.walkFrame += 0.15;
+  }
+
+  // --- Pick up items ---
+  if (!sword.collected) {
+    const dx = player.x - sword.x, dy = player.y - sword.y;
+    if (Math.sqrt(dx * dx + dy * dy) < 30) {
+      sword.collected = true;
+      inventory.sword = true;
+      player.hasSword = true;
+      sfxPickup();
+      showMessage('You found a SWORD! ⚔️', 180);
+    }
+  }
+  if (!sake.collected) {
+    const dx = player.x - sake.x, dy = player.y - sake.y;
+    if (Math.sqrt(dx * dx + dy * dy) < 30) {
+      sake.collected = true;
+      inventory.sake = true;
+      sfxPickup();
+      showMessage('You found a SAKE bottle! 🍶 Place it near the samurai with Space.', 240);
+    }
+  }
+
+  // --- Torii gate proximity sound ---
+  for (const g of toriiGates) {
+    const dx = player.x - g.x, dy = player.y - g.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < 40 && !g.passed) {
+      g.passed = true;
+      sfxGate();
+    }
+    if (dist > 80) g.passed = false;
+  }
+
+  // --- Samurai AI ---
+  if (!samurai.defeated) {
+    if (samurai.drinking) {
+      samurai.drinkTimer--;
+      if (samurai.drinkTimer <= 0) {
+        samurai.drinking = false;
+        samurai.drunk = true;
+        samurai.speed = 0.4;
+        showMessage('The samurai is drunk! Now is your chance! 🍶', 200);
+      }
+    } else {
+      // Patrol
+      const target = samurai.patrolPoints[samurai.patrolIdx];
+      const dx = target.x - samurai.x;
+      const dy = target.y - samurai.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      if (dist < 5) {
+        samurai.patrolIdx = (samurai.patrolIdx + 1) % samurai.patrolPoints.length;
+      } else {
+        const spd = samurai.drunk ? 0.4 : samurai.speed;
+        samurai.x += (dx / dist) * spd;
+        samurai.y += (dy / dist) * spd;
+      }
+
+      // Wobble when drunk
+      if (samurai.drunk) {
+        samurai.wobble += 0.08;
+        samurai.x += Math.sin(samurai.wobble) * 0.5;
+      }
+
+      // Check for placed sake
+      if (placedSake && !samurai.drunk && !samurai.drinking) {
+        const sdx = placedSake.x - samurai.x, sdy = placedSake.y - samurai.y;
+        const sdist = Math.sqrt(sdx * sdx + sdy * sdy);
+        if (sdist < 40) {
+          samurai.drinking = true;
+          samurai.drinkTimer = 120; // 2 seconds
+          sfxDrink();
+          showMessage('The samurai found the sake and is drinking it...', 150);
+        }
+      }
+    }
+  }
+
+  // --- Fight animation ---
+  if (fightAnim > 0) {
+    fightAnim--;
+    if (fightAnim === 1) {
+      samurai.defeated = true;
+      sister.freed = true;
+      sfxVictory();
+      gameState = 'victory';
+      victoryTimer = 0;
+    }
+  }
+
+  // --- Fireflies ---
+  for (const f of fireflies) {
+    f.phase += 0.02;
+    f.drift += 0.005 + Math.random() * 0.01;
+    f.x += Math.cos(f.drift) * f.speed * 0.3;
+    f.y += Math.sin(f.drift) * f.speed * 0.3;
+    // Wrap around
+    if (f.x < 0) f.x += WORLD_W;
+    if (f.x > WORLD_W) f.x -= WORLD_W;
+    if (f.y < 0) f.y += WORLD_H;
+    if (f.y > WORLD_H) f.y -= WORLD_H;
+  }
+
+  // --- Messages ---
+  messages = messages.filter(m => {
+    m.timer--;
+    if (m.timer < 30) m.alpha = m.timer / 30;
+    return m.timer > 0;
+  });
+
+  // --- Camera ---
+  camera.x = player.x - canvas.width / 2;
+  camera.y = player.y - canvas.height / 2;
+  camera.x = Math.max(0, Math.min(WORLD_W - canvas.width, camera.x));
+  camera.y = Math.max(0, Math.min(WORLD_H - canvas.height, camera.y));
+}
+
+// ======================== DRAWING ========================
+function drawGround() {
+  // Draw visible tiles
+  const startX = Math.floor(camera.x / TILE);
+  const startY = Math.floor(camera.y / TILE);
+  const endX = Math.min(MAP_W, startX + Math.ceil(canvas.width / TILE) + 2);
+  const endY = Math.min(MAP_H, startY + Math.ceil(canvas.height / TILE) + 2);
+
+  for (let y = startY; y < endY; y++) {
+    for (let x = startX; x < endX; x++) {
+      const sx = x * TILE - camera.x;
+      const sy = y * TILE - camera.y;
+      const tile = pathMap[y]?.[x] || 0;
+
+      if (tile === 0) {
+        // Forest floor - dark green with variation
+        const shade = ((x * 7 + y * 13) % 5) * 3;
+        ctx.fillStyle = `rgb(${28 + shade}, ${52 + shade}, ${22 + shade})`;
+      } else if (tile === 1) {
+        // Path - sandy brown
+        const shade = ((x * 3 + y * 7) % 4) * 4;
+        ctx.fillStyle = `rgb(${140 + shade}, ${115 + shade}, ${75 + shade})`;
+      } else {
+        // Clearing - lighter ground
+        const shade = ((x * 5 + y * 11) % 3) * 3;
+        ctx.fillStyle = `rgb(${120 + shade}, ${105 + shade}, ${65 + shade})`;
+      }
+      ctx.fillRect(sx, sy, TILE + 1, TILE + 1);
+
+      // Grass tufts on forest floor
+      if (tile === 0 && (x + y) % 3 === 0) {
+        ctx.fillStyle = `rgba(40, 80, 30, 0.6)`;
+        ctx.fillRect(sx + 8, sy + 12, 2, 6);
+        ctx.fillRect(sx + 12, sy + 10, 2, 7);
+        ctx.fillRect(sx + 20, sy + 18, 2, 5);
+      }
+    }
+  }
+}
+
+function drawTree(t) {
+  const sx = t.x - camera.x;
+  const sy = t.y - camera.y;
+
+  // Skip if off screen
+  if (sx < -30 || sx > canvas.width + 30 || sy < -30 || sy > canvas.height + 30) return;
+
+  // Trunk
+  ctx.fillStyle = '#4a3728';
+  ctx.fillRect(sx - 3, sy - 2, 6, 10);
+
+  // Canopy - layered for depth
+  const g = Math.floor(t.shade * 60);
+  const baseGreen = t.type < 0.3 ? [20, 70 - g, 25] :
+                    t.type < 0.6 ? [30, 85 - g, 30] :
+                                   [15, 60 - g, 20];
+
+  // Shadow
+  ctx.fillStyle = `rgba(0, 0, 0, 0.2)`;
+  ctx.beginPath();
+  ctx.arc(sx + 2, sy + 4, t.r, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Main canopy
+  ctx.fillStyle = `rgb(${baseGreen[0]}, ${baseGreen[1]}, ${baseGreen[2]})`;
+  ctx.beginPath();
+  ctx.arc(sx, sy - 4, t.r, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Highlight
+  ctx.fillStyle = `rgba(60, 120, 40, 0.3)`;
+  ctx.beginPath();
+  ctx.arc(sx - 2, sy - 6, t.r * 0.6, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawToriiGate(g) {
+  const sx = g.x - camera.x;
+  const sy = g.y - camera.y;
+
+  if (sx < -40 || sx > canvas.width + 40 || sy < -60 || sy > canvas.height + 40) return;
+
+  const red = '#c41e2a';
+  const darkRed = '#8b1520';
+  const black = '#1a1a1a';
+
+  // Pillars
+  ctx.fillStyle = red;
+  ctx.fillRect(sx - 20, sy - 10, 6, 40);
+  ctx.fillRect(sx + 14, sy - 10, 6, 40);
+
+  // Pillar bases
+  ctx.fillStyle = darkRed;
+  ctx.fillRect(sx - 22, sy + 28, 10, 4);
+  ctx.fillRect(sx + 12, sy + 28, 10, 4);
+
+  // Top crossbar (kasagi)
+  ctx.fillStyle = red;
+  ctx.fillRect(sx - 26, sy - 18, 52, 6);
+  // Curved ends
+  ctx.fillRect(sx - 28, sy - 16, 4, 4);
+  ctx.fillRect(sx + 24, sy - 16, 4, 4);
+
+  // Upper crossbar
+  ctx.fillStyle = darkRed;
+  ctx.fillRect(sx - 24, sy - 20, 48, 4);
+
+  // Lower crossbar (nuki)
+  ctx.fillStyle = red;
+  ctx.fillRect(sx - 18, sy - 6, 36, 4);
+
+  // Center tablet (gakuzuka)
+  ctx.fillStyle = black;
+  ctx.fillRect(sx - 6, sy - 16, 12, 12);
+  ctx.fillStyle = '#d4af37';
+  ctx.font = '8px serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('鳥', sx, sy - 8);
+
+  // Glow effect
+  ctx.save();
+  const glow = 0.15 + Math.sin(gameTime * 0.03 + g.x * 0.01) * 0.1;
+  ctx.globalAlpha = glow;
+  ctx.fillStyle = '#ff4444';
+  ctx.beginPath();
+  ctx.arc(sx, sy, 35, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawSword() {
+  if (sword.collected) return;
+  const sx = sword.x - camera.x;
+  const sy = sword.y - camera.y;
+  if (sx < -20 || sx > canvas.width + 20 || sy < -20 || sy > canvas.height + 20) return;
+
+  // Glow
+  ctx.save();
+  ctx.globalAlpha = 0.3 + Math.sin(gameTime * 0.05) * 0.15;
+  ctx.fillStyle = '#aaddff';
+  ctx.beginPath();
+  ctx.arc(sx, sy, 18, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // Blade
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.rotate(-Math.PI / 4);
+  ctx.fillStyle = '#ccd8e0';
+  ctx.fillRect(-2, -14, 4, 20);
+  // Edge highlight
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(-1, -14, 1, 18);
+  // Guard (tsuba)
+  ctx.fillStyle = '#8b6914';
+  ctx.fillRect(-5, 5, 10, 3);
+  // Handle
+  ctx.fillStyle = '#4a2810';
+  ctx.fillRect(-2, 8, 4, 10);
+  // Handle wrap
+  ctx.fillStyle = '#2a1808';
+  for (let i = 0; i < 4; i++) ctx.fillRect(-2, 9 + i * 3, 4, 1);
+  ctx.restore();
+}
+
+function drawSake() {
+  if (sake.collected) return;
+  const sx = sake.x - camera.x;
+  const sy = sake.y - camera.y;
+  if (sx < -20 || sx > canvas.width + 20 || sy < -20 || sy > canvas.height + 20) return;
+
+  // Glow
+  ctx.save();
+  ctx.globalAlpha = 0.25 + Math.sin(gameTime * 0.04) * 0.1;
+  ctx.fillStyle = '#ffddaa';
+  ctx.beginPath();
+  ctx.arc(sx, sy, 16, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  drawSakeBottle(sx, sy);
+}
+
+function drawSakeBottle(sx, sy) {
+  // Bottle body
+  ctx.fillStyle = '#e8dcc8';
+  ctx.fillRect(sx - 5, sy - 4, 10, 14);
+  // Neck
+  ctx.fillStyle = '#e8dcc8';
+  ctx.fillRect(sx - 3, sy - 10, 6, 8);
+  // Opening
+  ctx.fillStyle = '#c8b8a0';
+  ctx.fillRect(sx - 2, sy - 12, 4, 3);
+  // Label
+  ctx.fillStyle = '#c41e2a';
+  ctx.fillRect(sx - 4, sy - 2, 8, 6);
+  ctx.fillStyle = '#fff';
+  ctx.font = '6px serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('酒', sx, sy + 3);
+}
+
+function drawPlacedSake() {
+  if (!placedSake) return;
+  const sx = placedSake.x - camera.x;
+  const sy = placedSake.y - camera.y;
+  drawSakeBottle(sx, sy);
+}
+
+function drawPlayer() {
+  const sx = player.x - camera.x;
+  const sy = player.y - camera.y;
+  const bob = Math.sin(player.walkFrame) * 2;
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
+  ctx.beginPath();
+  ctx.ellipse(sx, sy + 12, 8, 4, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Body
+  ctx.fillStyle = '#3a6ea5';
+  ctx.fillRect(sx - 6, sy - 4 + bob, 12, 14);
+
+  // Head
+  ctx.fillStyle = '#f5d0a9';
+  ctx.beginPath();
+  ctx.arc(sx, sy - 8 + bob, 7, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Hair
+  ctx.fillStyle = '#1a1a2e';
+  ctx.beginPath();
+  ctx.arc(sx, sy - 10 + bob, 7, Math.PI, Math.PI * 2);
+  ctx.fill();
+  ctx.fillRect(sx - 7, sy - 11 + bob, 14, 3);
+
+  // Eyes based on direction
+  ctx.fillStyle = '#1a1a1a';
+  if (player.dir === 0) { // down
+    ctx.fillRect(sx - 3, sy - 7 + bob, 2, 2);
+    ctx.fillRect(sx + 1, sy - 7 + bob, 2, 2);
+  } else if (player.dir === 2) { // up
+    // no eyes visible
+  } else if (player.dir === 1) { // left
+    ctx.fillRect(sx - 4, sy - 7 + bob, 2, 2);
+  } else { // right
+    ctx.fillRect(sx + 2, sy - 7 + bob, 2, 2);
+  }
+
+  // Sword on back if collected
+  if (player.hasSword) {
+    ctx.save();
+    ctx.translate(sx + 8, sy - 2 + bob);
+    ctx.rotate(0.3);
+    ctx.fillStyle = '#ccd8e0';
+    ctx.fillRect(-1, -12, 3, 16);
+    ctx.fillStyle = '#8b6914';
+    ctx.fillRect(-2, 3, 5, 2);
+    ctx.fillStyle = '#4a2810';
+    ctx.fillRect(-1, 5, 3, 6);
+    ctx.restore();
+  }
+
+  // Fight animation
+  if (fightAnim > 0) {
+    ctx.save();
+    ctx.translate(sx, sy);
+    const angle = (60 - fightAnim) * 0.3;
+    ctx.rotate(Math.sin(angle) * 0.5);
+    // Sword slash
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, 0, 20 + Math.sin(angle * 3) * 10, angle - 1, angle + 1);
+    ctx.stroke();
+    ctx.restore();
+
+    // Sparks
+    for (let i = 0; i < 3; i++) {
+      ctx.fillStyle = `rgba(255, ${200 + Math.random() * 55}, 0, ${Math.random()})`;
+      ctx.fillRect(
+        sx + Math.cos(fightAnim * 0.5 + i) * 25,
+        sy + Math.sin(fightAnim * 0.5 + i) * 25,
+        3, 3
+      );
+    }
+  }
+}
+
+function drawSamurai() {
+  if (samurai.defeated) return;
+  const sx = samurai.x - camera.x;
+  const sy = samurai.y - camera.y;
+  if (sx < -30 || sx > canvas.width + 30 || sy < -30 || sy > canvas.height + 30) return;
+
+  const wobble = samurai.drunk ? Math.sin(samurai.wobble) * 3 : 0;
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
+  ctx.beginPath();
+  ctx.ellipse(sx, sy + 14, 10, 5, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Drinking animation
+  if (samurai.drinking) {
+    const drinkBob = Math.sin(samurai.drinkTimer * 0.2) * 2;
+    // Body tilted
+    ctx.save();
+    ctx.translate(sx, sy);
+    ctx.rotate(0.15);
+    ctx.fillStyle = '#2a2a2a';
+    ctx.fillRect(-8, -6, 16, 18);
+    // Sake cup
+    ctx.fillStyle = '#e8dcc8';
+    ctx.fillRect(10, -8 + drinkBob, 6, 5);
+    ctx.restore();
+    // Head
+    ctx.fillStyle = '#f0c890';
+    ctx.beginPath();
+    ctx.arc(sx + wobble, sy - 10, 8, 0, Math.PI * 2);
+    ctx.fill();
+    return;
+  }
+
+  // Armor body
+  ctx.fillStyle = samurai.drunk ? '#3a3a3a' : '#2a2a2a';
+  ctx.fillRect(sx - 8 + wobble, sy - 6, 16, 18);
+
+  // Shoulder pads
+  ctx.fillStyle = '#8b0000';
+  ctx.fillRect(sx - 12 + wobble, sy - 6, 6, 8);
+  ctx.fillRect(sx + 6 + wobble, sy - 6, 6, 8);
+
+  // Head
+  ctx.fillStyle = '#f0c890';
+  ctx.beginPath();
+  ctx.arc(sx + wobble, sy - 10, 8, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Helmet (kabuto)
+  ctx.fillStyle = '#1a1a2e';
+  ctx.beginPath();
+  ctx.arc(sx + wobble, sy - 12, 9, Math.PI, Math.PI * 2);
+  ctx.fill();
+  // Helmet crest
+  ctx.fillStyle = '#8b0000';
+  ctx.fillRect(sx - 1 + wobble, sy - 22, 2, 10);
+  ctx.fillRect(sx - 4 + wobble, sy - 22, 8, 3);
+
+  // Eyes - menacing
+  ctx.fillStyle = samurai.drunk ? '#ff6666' : '#ff0000';
+  ctx.fillRect(sx - 4 + wobble, sy - 11, 3, 2);
+  ctx.fillRect(sx + 1 + wobble, sy - 11, 3, 2);
+
+  // Sword (katana)
+  if (!samurai.drunk) {
+    ctx.fillStyle = '#ccd8e0';
+    ctx.save();
+    ctx.translate(sx + 12, sy - 4);
+    ctx.rotate(0.2);
+    ctx.fillRect(0, -16, 3, 24);
+    ctx.fillStyle = '#8b6914';
+    ctx.fillRect(-1, 7, 5, 3);
+    ctx.restore();
+  }
+
+  // Drunk effects
+  if (samurai.drunk) {
+    // Dizzy stars
+    for (let i = 0; i < 3; i++) {
+      const a = gameTime * 0.05 + i * 2.1;
+      ctx.fillStyle = '#ffff00';
+      ctx.font = '10px serif';
+      ctx.fillText('★', sx + Math.cos(a) * 15, sy - 20 + Math.sin(a) * 5);
+    }
+    // Blush
+    ctx.fillStyle = 'rgba(255, 100, 100, 0.4)';
+    ctx.beginPath();
+    ctx.arc(sx - 5 + wobble, sy - 8, 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(sx + 5 + wobble, sy - 8, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Alert indicator if player is near and not drunk
+  if (!samurai.drunk && !samurai.drinking) {
+    const dx = player.x - samurai.x, dy = player.y - samurai.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < 120) {
+      ctx.fillStyle = '#ff0000';
+      ctx.font = 'bold 16px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('!', sx, sy - 28);
+    }
+  }
+}
+
+function drawSister() {
+  const sx = sister.x - camera.x;
+  const sy = sister.y - camera.y;
+  if (sx < -20 || sx > canvas.width + 20 || sy < -20 || sy > canvas.height + 20) return;
+
+  const bob = Math.sin(gameTime * 0.03) * 1;
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+  ctx.beginPath();
+  ctx.ellipse(sx, sy + 12, 7, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Kimono body
+  ctx.fillStyle = '#e84393';
+  ctx.fillRect(sx - 6, sy - 2 + bob, 12, 14);
+  // Kimono pattern
+  ctx.fillStyle = '#fd79a8';
+  ctx.fillRect(sx - 4, sy + bob, 2, 10);
+  ctx.fillRect(sx + 2, sy + bob, 2, 10);
+
+  // Obi (belt)
+  ctx.fillStyle = '#d63031';
+  ctx.fillRect(sx - 6, sy + 4 + bob, 12, 3);
+
+  // Head
+  ctx.fillStyle = '#f5d0a9';
+  ctx.beginPath();
+  ctx.arc(sx, sy - 6 + bob, 7, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Hair - long
+  ctx.fillStyle = '#1a1a2e';
+  ctx.beginPath();
+  ctx.arc(sx, sy - 8 + bob, 7, Math.PI * 0.8, Math.PI * 2.2);
+  ctx.fill();
+  ctx.fillRect(sx - 7, sy - 8 + bob, 3, 14);
+  ctx.fillRect(sx + 4, sy - 8 + bob, 3, 14);
+
+  // Eyes
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(sx - 3, sy - 6 + bob, 2, 2);
+  ctx.fillRect(sx + 1, sy - 6 + bob, 2, 2);
+
+  // If not freed - rope/chain visual
+  if (!sister.freed) {
+    ctx.strokeStyle = '#8b7355';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.arc(sx, sy + 4, 12, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Sad expression - tears
+    ctx.fillStyle = '#74b9ff';
+    ctx.fillRect(sx - 3, sy - 4 + bob, 1, 3);
+    ctx.fillRect(sx + 2, sy - 4 + bob, 1, 3);
+  }
+
+  // Help text
+  if (!sister.freed && !samurai.defeated) {
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Help me...', sx, sy - 20);
+  }
+}
+
+function drawShrineStones() {
+  for (const s of shrineStones) {
+    const sx = s.x - camera.x;
+    const sy = s.y - camera.y;
+    if (sx < -20 || sx > canvas.width + 20 || sy < -20 || sy > canvas.height + 20) continue;
+    ctx.fillStyle = '#666';
+    ctx.fillRect(sx - s.w / 2, sy - s.h / 2, s.w, s.h);
+    ctx.fillStyle = '#555';
+    ctx.fillRect(sx - s.w / 2, sy - s.h / 2, s.w, 2);
+  }
+}
+
+function drawFireflies() {
+  for (const f of fireflies) {
+    const sx = f.x - camera.x;
+    const sy = f.y - camera.y;
+    if (sx < -10 || sx > canvas.width + 10 || sy < -10 || sy > canvas.height + 10) continue;
+
+    const alpha = 0.3 + Math.sin(f.phase + gameTime * 0.03) * 0.3;
+    if (alpha <= 0) continue;
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    // Glow
+    const grad = ctx.createRadialGradient(sx, sy, 0, sx, sy, f.radius * 3);
+    grad.addColorStop(0, 'rgba(200, 255, 100, 0.5)');
+    grad.addColorStop(1, 'rgba(200, 255, 100, 0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(sx, sy, f.radius * 3, 0, Math.PI * 2);
+    ctx.fill();
+    // Core
+    ctx.fillStyle = '#eeffaa';
+    ctx.beginPath();
+    ctx.arc(sx, sy, f.radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawUI() {
+  // Inventory
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+  ctx.fillRect(10, 10, 180, 44);
+  ctx.strokeStyle = '#d4af37';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(10, 10, 180, 44);
+
+  ctx.fillStyle = '#d4af37';
+  ctx.font = '12px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('持ち物 (Items)', 18, 26);
+
+  // Sword slot
+  ctx.fillStyle = inventory.sword ? 'rgba(100, 200, 255, 0.3)' : 'rgba(50, 50, 50, 0.5)';
+  ctx.fillRect(18, 32, 70, 16);
+  ctx.fillStyle = inventory.sword ? '#aaddff' : '#666';
+  ctx.font = '10px sans-serif';
+  ctx.fillText(inventory.sword ? '⚔️ Sword' : '⬜ -----', 22, 44);
+
+  // Sake slot
+  ctx.fillStyle = inventory.sake ? 'rgba(255, 200, 100, 0.3)' : 'rgba(50, 50, 50, 0.5)';
+  ctx.fillRect(96, 32, 70, 16);
+  ctx.fillStyle = inventory.sake ? '#ffcc66' : '#666';
+  ctx.fillText(inventory.sake ? '🍶 Sake' : '⬜ -----', 100, 44);
+
+  // Messages
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    ctx.save();
+    ctx.globalAlpha = m.alpha;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+    const tw = ctx.measureText(m.text).width + 30;
+    const mx = (canvas.width - tw) / 2;
+    const my = canvas.height - 80 - i * 35;
+    ctx.fillRect(mx, my, tw, 28);
+    ctx.strokeStyle = '#d4af37';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(mx, my, tw, 28);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '13px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(m.text, canvas.width / 2, my + 18);
+    ctx.restore();
+  }
+
+  // Minimap
+  const mmW = 120, mmH = 90;
+  const mmX = canvas.width - mmW - 10, mmY = 10;
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+  ctx.fillRect(mmX, mmY, mmW, mmH);
+  ctx.strokeStyle = '#d4af37';
+  ctx.strokeRect(mmX, mmY, mmW, mmH);
+
+  // Player dot on minimap
+  const px = mmX + (player.x / WORLD_W) * mmW;
+  const py = mmY + (player.y / WORLD_H) * mmH;
+  ctx.fillStyle = '#3a6ea5';
+  ctx.fillRect(px - 2, py - 2, 4, 4);
+
+  // Samurai dot
+  if (!samurai.defeated) {
+    const smx = mmX + (samurai.x / WORLD_W) * mmW;
+    const smy = mmY + (samurai.y / WORLD_H) * mmH;
+    ctx.fillStyle = '#ff0000';
+    ctx.fillRect(smx - 2, smy - 2, 4, 4);
+  }
+
+  // Sister dot
+  const six = mmX + (sister.x / WORLD_W) * mmW;
+  const siy = mmY + (sister.y / WORLD_H) * mmH;
+  ctx.fillStyle = '#e84393';
+  ctx.fillRect(six - 1, siy - 1, 3, 3);
+
+  // Torii gates on minimap
+  ctx.fillStyle = '#c41e2a';
+  for (const g of toriiGates) {
+    const gx = mmX + (g.x / WORLD_W) * mmW;
+    const gy = mmY + (g.y / WORLD_H) * mmH;
+    ctx.fillRect(gx - 1, gy - 1, 2, 2);
+  }
+
+  // Items on minimap (only if not collected)
+  if (!sword.collected) {
+    const swx = mmX + (sword.x / WORLD_W) * mmW;
+    const swy = mmY + (sword.y / WORLD_H) * mmH;
+    ctx.fillStyle = '#aaddff';
+    ctx.fillRect(swx - 1, swy - 1, 3, 3);
+  }
+  if (!sake.collected && !inventory.sake) {
+    const skx = mmX + (sake.x / WORLD_W) * mmW;
+    const sky = mmY + (sake.y / WORLD_H) * mmH;
+    ctx.fillStyle = '#ffcc66';
+    ctx.fillRect(skx - 1, sky - 1, 3, 3);
+  }
+
+  // Hint text
+  if (inventory.sake) {
+    ctx.fillStyle = 'rgba(255, 200, 100, 0.8)';
+    ctx.font = '11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Press SPACE near samurai patrol to place sake', canvas.width / 2, 20);
+  }
+}
+
+// ======================== TITLE SCREEN ========================
+function drawTitle() {
+  titlePulse += 0.02;
+
+  // Background
+  ctx.fillStyle = '#0a0e14';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Stars / particles
+  for (let i = 0; i < 50; i++) {
+    const x = ((i * 137 + gameTime * 0.1) % canvas.width);
+    const y = ((i * 97 + gameTime * 0.05) % canvas.height);
+    const alpha = 0.3 + Math.sin(gameTime * 0.02 + i) * 0.2;
+    ctx.fillStyle = `rgba(200, 255, 100, ${alpha})`;
+    ctx.beginPath();
+    ctx.arc(x, y, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Large torii gate
+  const cx = canvas.width / 2;
+  const cy = 200;
+
+  // Torii glow
+  ctx.save();
+  ctx.globalAlpha = 0.15 + Math.sin(titlePulse) * 0.05;
+  const grd = ctx.createRadialGradient(cx, cy, 20, cx, cy, 120);
+  grd.addColorStop(0, '#c41e2a');
+  grd.addColorStop(1, 'transparent');
+  ctx.fillStyle = grd;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 120, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // Torii gate - large
+  ctx.fillStyle = '#c41e2a';
+  ctx.fillRect(cx - 60, cy - 30, 10, 100);
+  ctx.fillRect(cx + 50, cy - 30, 10, 100);
+  ctx.fillRect(cx - 70, cy - 50, 140, 10);
+  ctx.fillStyle = '#8b1520';
+  ctx.fillRect(cx - 68, cy - 55, 136, 8);
+  ctx.fillStyle = '#c41e2a';
+  ctx.fillRect(cx - 55, cy - 20, 110, 6);
+  // Curved ends
+  ctx.fillRect(cx - 74, cy - 48, 6, 8);
+  ctx.fillRect(cx + 68, cy - 48, 6, 8);
+
+  // Center tablet
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(cx - 15, cy - 46, 30, 28);
+  ctx.fillStyle = '#d4af37';
+  ctx.font = '16px serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('鳥居', cx, cy - 26);
+
+  // Title
+  ctx.fillStyle = '#d4af37';
+  ctx.font = 'bold 48px serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('T O R I', cx, cy + 120);
+
+  ctx.fillStyle = '#c41e2a';
+  ctx.font = '24px serif';
+  ctx.fillText('鳥 居', cx, cy + 150);
+
+  // Subtitle
+  ctx.fillStyle = '#8899aa';
+  ctx.font = '14px sans-serif';
+  ctx.fillText('A Tale of Courage in the Mystic Forest', cx, cy + 180);
+
+  // Press Enter
+  ctx.globalAlpha = 0.5 + Math.sin(titlePulse * 2) * 0.4;
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '16px sans-serif';
+  ctx.fillText('Press ENTER to Start', cx, cy + 240);
+  ctx.globalAlpha = 1;
+
+  // Controls
+  ctx.fillStyle = '#556677';
+  ctx.font = '11px sans-serif';
+  ctx.fillText('WASD/Arrows: Move  |  Space: Action', cx, canvas.height - 30);
+
+  gameTime++;
+}
+
+// ======================== VICTORY SCREEN ========================
+function drawVictory() {
+  victoryTimer++;
+  const cx = canvas.width / 2;
+
+  // Fade in background
+  ctx.fillStyle = `rgba(10, 14, 20, ${Math.min(1, victoryTimer * 0.02)})`;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  if (victoryTimer < 20) return;
+
+  // Cherry blossom petals
+  for (let i = 0; i < 30; i++) {
+    const x = ((i * 73 + victoryTimer * 0.8) % (canvas.width + 40)) - 20;
+    const y = ((i * 53 + victoryTimer * 0.5 + Math.sin(victoryTimer * 0.02 + i) * 30) % (canvas.height + 40)) - 20;
+    ctx.fillStyle = `rgba(255, ${150 + (i % 50)}, ${180 + (i % 30)}, ${0.4 + Math.sin(victoryTimer * 0.03 + i) * 0.2})`;
+    ctx.beginPath();
+    ctx.ellipse(x, y, 4, 2, victoryTimer * 0.01 + i, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Victory text
+  ctx.fillStyle = '#d4af37';
+  ctx.font = 'bold 42px serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('勝 利', cx, 180);
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 32px sans-serif';
+  ctx.fillText('VICTORY', cx, 230);
+
+  ctx.fillStyle = '#aabbcc';
+  ctx.font = '16px sans-serif';
+  ctx.fillText('You defeated the samurai and freed your sister!', cx, 290);
+
+  // Characters reunited
+  const reuniteY = 370;
+  // Boy
+  ctx.fillStyle = '#3a6ea5';
+  ctx.fillRect(cx - 20, reuniteY, 12, 14);
+  ctx.fillStyle = '#f5d0a9';
+  ctx.beginPath();
+  ctx.arc(cx - 14, reuniteY - 6, 7, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#1a1a2e';
+  ctx.beginPath();
+  ctx.arc(cx - 14, reuniteY - 8, 7, Math.PI, Math.PI * 2);
+  ctx.fill();
+
+  // Sister
+  ctx.fillStyle = '#e84393';
+  ctx.fillRect(cx + 8, reuniteY, 12, 14);
+  ctx.fillStyle = '#f5d0a9';
+  ctx.beginPath();
+  ctx.arc(cx + 14, reuniteY - 6, 7, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#1a1a2e';
+  ctx.beginPath();
+  ctx.arc(cx + 14, reuniteY - 8, 7, Math.PI * 0.8, Math.PI * 2.2);
+  ctx.fill();
+
+  // Hearts
+  const heartAlpha = 0.5 + Math.sin(victoryTimer * 0.05) * 0.3;
+  ctx.fillStyle = `rgba(255, 100, 150, ${heartAlpha})`;
+  ctx.font = '20px serif';
+  ctx.fillText('❤️', cx, reuniteY - 25);
+
+  // Continue
+  if (victoryTimer > 80) {
+    ctx.globalAlpha = 0.5 + Math.sin(victoryTimer * 0.05) * 0.4;
+    ctx.fillStyle = '#888';
+    ctx.font = '14px sans-serif';
+    ctx.fillText('Press ENTER to return to title', cx, canvas.height - 40);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ======================== MAIN RENDER ========================
+function render() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if (gameState === 'title') {
+    drawTitle();
+    return;
+  }
+
+  if (gameState === 'victory') {
+    drawVictory();
+    return;
+  }
+
+  // --- Game world ---
+  drawGround();
+  drawShrineStones();
+
+  // Collect all drawable entities with y-position for sorting (depth)
+  let entities = [];
+
+  // Trees
+  trees.forEach(t => entities.push({ y: t.y, draw: () => drawTree(t) }));
+
+  // Torii gates
+  toriiGates.forEach(g => entities.push({ y: g.y + 30, draw: () => drawToriiGate(g) }));
+
+  // Items
+  if (!sword.collected) entities.push({ y: sword.y, draw: drawSword });
+  if (!sake.collected) entities.push({ y: sake.y, draw: drawSake });
+  if (placedSake) entities.push({ y: placedSake.y, draw: drawPlacedSake });
+
+  // Characters
+  entities.push({ y: player.y, draw: drawPlayer });
+  if (!samurai.defeated) entities.push({ y: samurai.y, draw: drawSamurai });
+  entities.push({ y: sister.y, draw: drawSister });
+
+  // Sort by y for depth
+  entities.sort((a, b) => a.y - b.y);
+  entities.forEach(e => e.draw());
+
+  // Fireflies on top
+  drawFireflies();
+
+  // Dark vignette overlay
+  const vignette = ctx.createRadialGradient(
+    canvas.width / 2, canvas.height / 2, canvas.width * 0.3,
+    canvas.width / 2, canvas.height / 2, canvas.width * 0.75
+  );
+  vignette.addColorStop(0, 'rgba(0, 0, 0, 0)');
+  vignette.addColorStop(1, 'rgba(0, 10, 5, 0.4)');
+  ctx.fillStyle = vignette;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // UI
+  drawUI();
+}
+
+// ======================== GAME LOOP ========================
+function gameLoop() {
+  update();
+  render();
+  requestAnimationFrame(gameLoop);
+}
+
+// Resize canvas to fit window
+function resize() {
+  const ratio = 800 / 600;
+  let w = window.innerWidth;
+  let h = window.innerHeight;
+  if (w / h > ratio) w = h * ratio;
+  else h = w / ratio;
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+}
+window.addEventListener('resize', resize);
+resize();
+
+// Start
+gameLoop();
+</script>
+</body>
+</html>
