@@ -2,11 +2,13 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <title>TORI - 鳥居</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { background: #0a0a0a; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; }
+body { background: #0a0a0a; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; touch-action: none; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
 canvas { display: block; image-rendering: pixelated; cursor: none; }
 </style>
 </head>
@@ -72,6 +74,117 @@ let fightAnim = 0;
 let victoryTimer = 0;
 let titlePulse = 0;
 let gameTime = 0;
+let isMobile = false;
+
+// ======================== MOBILE DETECTION ========================
+function detectMobile() {
+  isMobile = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0) || window.innerWidth < 900;
+  return isMobile;
+}
+detectMobile();
+window.addEventListener('resize', () => { detectMobile(); resize(); });
+
+// ======================== TOUCH CONTROLS ========================
+let touchJoystick = { active: false, id: null, startX: 0, startY: 0, dx: 0, dy: 0, maxR: 50 };
+let touchAction = { active: false, id: null };
+let touchDirKeys = { up: false, down: false, left: false, right: false };
+
+function canvasTouchPos(touch) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (touch.clientX - rect.left) / rect.clientWidth * canvas.width,
+    y: (touch.clientY - rect.top) / rect.clientHeight * canvas.height
+  };
+}
+
+canvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  ensureAudio();
+
+  if (gameState === 'title') {
+    gameState = 'playing';
+    initGame();
+    showMessage('Find the sword and sake bottle...', 240);
+    return;
+  }
+  if (gameState === 'victory') {
+    gameState = 'title';
+    return;
+  }
+
+  for (const touch of e.changedTouches) {
+    const pos = canvasTouchPos(touch);
+
+    // Right side = action button
+    if (pos.x > canvas.width * 0.6) {
+      touchAction.active = true;
+      touchAction.id = touch.identifier;
+      handleAction();
+    }
+    // Left side = joystick
+    else if (!touchJoystick.active) {
+      touchJoystick.active = true;
+      touchJoystick.id = touch.identifier;
+      touchJoystick.startX = touch.clientX;
+      touchJoystick.startY = touch.clientY;
+      touchJoystick.dx = 0;
+      touchJoystick.dy = 0;
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  for (const touch of e.changedTouches) {
+    if (touch.identifier === touchJoystick.id) {
+      touchJoystick.dx = touch.clientX - touchJoystick.startX;
+      touchJoystick.dy = touch.clientY - touchJoystick.startY;
+      // Clamp
+      const dist = Math.sqrt(touchJoystick.dx ** 2 + touchJoystick.dy ** 2);
+      if (dist > touchJoystick.maxR) {
+        touchJoystick.dx = (touchJoystick.dx / dist) * touchJoystick.maxR;
+        touchJoystick.dy = (touchJoystick.dy / dist) * touchJoystick.maxR;
+      }
+      // Convert to keys
+      const threshold = 12;
+      touchDirKeys.left = touchJoystick.dx < -threshold;
+      touchDirKeys.right = touchJoystick.dx > threshold;
+      touchDirKeys.up = touchJoystick.dy < -threshold;
+      touchDirKeys.down = touchJoystick.dy > threshold;
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchend', (e) => {
+  e.preventDefault();
+  for (const touch of e.changedTouches) {
+    if (touch.identifier === touchJoystick.id) {
+      touchJoystick.active = false;
+      touchJoystick.id = null;
+      touchJoystick.dx = 0;
+      touchJoystick.dy = 0;
+      touchDirKeys.left = false;
+      touchDirKeys.right = false;
+      touchDirKeys.up = false;
+      touchDirKeys.down = false;
+    }
+    if (touch.identifier === touchAction.id) {
+      touchAction.active = false;
+      touchAction.id = null;
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchcancel', (e) => {
+  touchJoystick.active = false;
+  touchJoystick.dx = 0;
+  touchJoystick.dy = 0;
+  touchDirKeys.left = false;
+  touchDirKeys.right = false;
+  touchDirKeys.up = false;
+  touchDirKeys.down = false;
+  touchAction.active = false;
+}, { passive: false });
 
 // ======================== MAP GENERATION ========================
 // Path map: 0=grass, 1=path, 2=clearing
@@ -361,10 +474,10 @@ function update() {
     player.y += player.pushDy;
     player.pushTimer--;
   } else {
-    if (keys['a'] || keys['arrowleft'])  { mx -= 1; player.dir = 1; }
-    if (keys['d'] || keys['arrowright']) { mx += 1; player.dir = 3; }
-    if (keys['w'] || keys['arrowup'])    { my -= 1; player.dir = 2; }
-    if (keys['s'] || keys['arrowdown'])  { my += 1; player.dir = 0; }
+    if (keys['a'] || keys['arrowleft'] || touchDirKeys.left)  { mx -= 1; player.dir = 1; }
+    if (keys['d'] || keys['arrowright'] || touchDirKeys.right) { mx += 1; player.dir = 3; }
+    if (keys['w'] || keys['arrowup'] || touchDirKeys.up)    { my -= 1; player.dir = 2; }
+    if (keys['s'] || keys['arrowdown'] || touchDirKeys.down)  { my += 1; player.dir = 0; }
 
     if (mx && my) { mx *= 0.707; my *= 0.707; }
 
@@ -1121,9 +1234,80 @@ function drawUI() {
     ctx.fillStyle = 'rgba(255, 200, 100, 0.8)';
     ctx.font = '11px sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('Press SPACE near samurai patrol to place sake', canvas.width / 2, 20);
+    ctx.fillText(isMobile ? 'Tap right side near samurai patrol to place sake' : 'Press SPACE near samurai patrol to place sake', canvas.width / 2, 20);
+  }
+
+  // Mobile touch controls overlay
+  if (isMobile) {
+    drawTouchControls();
   }
 }
+
+function drawTouchControls() {
+  // Virtual joystick area (left side)
+  const jx = 90, jy = canvas.height - 100, jr = 45;
+
+  // Outer ring
+  ctx.save();
+  ctx.globalAlpha = 0.25;
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(jx, jy, jr, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // D-pad arrows
+  ctx.fillStyle = '#ffffff';
+  ctx.globalAlpha = 0.2;
+  ctx.font = '16px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('▲', jx, jy - jr + 14);
+  ctx.fillText('▼', jx, jy + jr - 4);
+  ctx.fillText('◀', jx - jr + 8, jy + 5);
+  ctx.fillText('▶', jx + jr - 8, jy + 5);
+
+  // Joystick thumb if active
+  if (touchJoystick.active) {
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = '#ffffff';
+    const thumbX = jx + (touchJoystick.dx / touchJoystick.maxR) * jr;
+    const thumbY = jy + (touchJoystick.dy / touchJoystick.maxR) * jr;
+    ctx.beginPath();
+    ctx.arc(thumbX, thumbY, 16, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    // Center dot
+    ctx.globalAlpha = 0.15;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(jx, jy, 10, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+
+  // Action button (right side)
+  const bx = canvas.width - 80, by = canvas.height - 100, br = 32;
+  ctx.save();
+  ctx.globalAlpha = touchAction.active ? 0.5 : 0.25;
+  ctx.fillStyle = '#c41e2a';
+  ctx.beginPath();
+  ctx.arc(bx, by, br, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#d4af37';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  ctx.globalAlpha = touchAction.active ? 0.9 : 0.6;
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 14px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('⚔', bx, by + 5);
+
+  ctx.globalAlpha = 0.4;
+  ctx.font = '9px sans-serif';
+  ctx.fillText('ACTION', bx, by + 22);
+  ctx.restore();
 
 // ======================== TITLE SCREEN ========================
 function drawTitle() {
@@ -1200,13 +1384,13 @@ function drawTitle() {
   ctx.globalAlpha = 0.5 + Math.sin(titlePulse * 2) * 0.4;
   ctx.fillStyle = '#ffffff';
   ctx.font = '16px sans-serif';
-  ctx.fillText('Press ENTER to Start', cx, cy + 240);
+  ctx.fillText(isMobile ? 'Tap to Start' : 'Press ENTER to Start', cx, cy + 240);
   ctx.globalAlpha = 1;
 
   // Controls
   ctx.fillStyle = '#556677';
   ctx.font = '11px sans-serif';
-  ctx.fillText('WASD/Arrows: Move  |  Space: Action', cx, canvas.height - 30);
+  ctx.fillText(isMobile ? 'Left side: Move  |  Right side: Action' : 'WASD/Arrows: Move  |  Space: Action', cx, canvas.height - 30);
 
   gameTime++;
 }
@@ -1283,7 +1467,7 @@ function drawVictory() {
     ctx.globalAlpha = 0.5 + Math.sin(victoryTimer * 0.05) * 0.4;
     ctx.fillStyle = '#888';
     ctx.font = '14px sans-serif';
-    ctx.fillText('Press ENTER to return to title', cx, canvas.height - 40);
+    ctx.fillText(isMobile ? 'Tap to return to title' : 'Press ENTER to return to title', cx, canvas.height - 40);
     ctx.globalAlpha = 1;
   }
 }
