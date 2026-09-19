@@ -297,13 +297,13 @@ function generateToriiGates() {
   toriiGates[2].pair = 6; toriiGates[6].pair = 2; // center <-> shrine area
   toriiGates[5].pair = 0; // center links back to start area (bonus route)
   
-  // Remove trees near gates
+  // Remove trees near gates - wide clearing so player doesn't get stuck after warping
   toriiGates.forEach(g => {
     g.cooldown = 0; // teleport cooldown
     g.warpAnim = 0; // warp visual effect timer
     trees = trees.filter(t => {
       const dx = t.x - g.x, dy = t.y - g.y;
-      return Math.sqrt(dx * dx + dy * dy) > 50;
+      return Math.sqrt(dx * dx + dy * dy) > 90;
     });
   });
 }
@@ -343,6 +343,24 @@ function initGame() {
   initPathMap();
   generateTrees();
   generateToriiGates();
+  
+  // Mark ground around torii gates as clearings on the pathMap
+  for (const g of toriiGates) {
+    const tileX = Math.round(g.x / TILE);
+    const tileY = Math.round(g.y / TILE);
+    const clearR = 3; // 3-tile radius clearing
+    for (let dy = -clearR; dy <= clearR; dy++) {
+      for (let dx = -clearR; dx <= clearR; dx++) {
+        if (dx * dx + dy * dy <= clearR * clearR) {
+          const nx = tileX + dx, ny = tileY + dy;
+          if (nx >= 0 && nx < MAP_W && ny >= 0 && ny < MAP_H) {
+            pathMap[ny][nx] = 2; // clearing tile
+          }
+        }
+      }
+    }
+  }
+  
   generateShrineStones();
   generateFireflies();
 
