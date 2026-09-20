@@ -27,6 +27,16 @@ Torii gates are not just spatial portals — they can transport you through **ti
 - **Time layers as puzzle mechanic** — Something you do in the past could change what's accessible in the present (a tree planted centuries ago now reveals a hidden path)
 - **Visual storytelling through time** — The same environment tells different stories depending on when you arrive (a battlefield becomes a garden becomes a ruin)
 
+### Torii in Space — The Final Frontier
+In later stages of the game, the torii network extends **beyond Earth and into outer space**. The ancient gate builders didn't stop at connecting sacred places on the ground — they reached for the stars:
+- **Orbital torii** — Gates floating in the void, connecting planets, moons, and asteroid shrines
+- **Cosmic sacred sites** — The gate builders recognized that sacredness isn't bound to Earth; certain points in space hold spiritual significance (orbital resonances, stellar alignments, the spaces between worlds)
+- **The boy follows the Kage-shū into space** — As the chase intensifies, the samurai clan flees through increasingly distant gates, forcing the boy beyond everything he knows
+- **Aesthetic shift** — The Japanese style evolves: sumi-e ink wash backgrounds become star fields, torii gates glow against the blackness of space, cherry blossoms drift in zero gravity
+- **New mechanics** — Space gates may require celestial alignment (planetary positions, eclipses), and the In-Between becomes longer and stranger between cosmic distances
+- **The sister's trail leads outward** — Her Spirit Sight marks shimmer among the stars, breadcrumbs across the solar system and beyond
+- **Scale as storytelling** — The intimacy of a forest shrine contrasted with the vastness of space amplifies the boy's loneliness and determination
+
 ---
 
 ## 🔧 Key Mechanics
@@ -141,11 +151,17 @@ Alone and desperate, the boy trains himself into a warrior — not through viole
 ---
 
 ## 🎮 Playable Prototype
-A working HTML5 Canvas demo is available in [`game/index.html`](game/index.html). Play it by opening the file in any browser.
+A working HTML5 Canvas demo is available in [`game/index.html`](game/index.html). Play it by opening the file in any browser (desktop & mobile).
 
-**Controls:** WASD/Arrow keys to move, Space to interact (place sake / fight samurai)
+**Play online:** [dotdbot.github.io/ToriGameMovie/game/index.html](https://dotdbot.github.io/ToriGameMovie/game/index.html)
 
-**Gameplay flow:** Explore forest → Find sword → Find sake → Place sake on samurai's patrol → Samurai drinks & gets drunk → Fight him → Free your sister!
+**Controls:**
+- **Desktop:** WASD/Arrow keys to move, Space to interact, Mouse wheel to zoom, Esc for save/load
+- **Mobile:** Touch joystick (left) to move, Action button (right) to interact, Pinch to zoom, Save/Load buttons on screen
+
+**Gameplay flow:** Explore forest → Walk through torii gates to warp across the map → Find sword → Find sake → Place sake on samurai's patrol → Samurai drinks & gets drunk → Fight him → Free your sister!
+
+**Features:** 7 paired torii wormholes with ink wash transitions, pinch-to-zoom (0.8x–3.0x), 8-slot save/load system, firefly particles, Web Audio SFX, minimap
 
 ---
 
@@ -157,4 +173,4 @@ A working HTML5 Canvas demo is available in [`game/index.html`](game/index.html)
 
 ---
 
-*Last updated: 2026-09-18*
+*Last updated: 2026-09-19*
