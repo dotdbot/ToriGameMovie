@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ima — Edo Living Room</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #efe4cc; font-family: "Hiragino Mincho ProN", "Yu Mincho", Georgia, serif; }
+  canvas { display: block; }
+  /* washi paper grain over the whole frame, like a woodblock print */
+  #paper { position: fixed; inset: 0; pointer-events: none; mix-blend-mode: multiply; opacity: .45;
+    background: radial-gradient(ellipse at center, transparent 55%, rgba(120,90,50,.35)),
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/><feColorMatrix values='0 0 0 0 .55 0 0 0 0 .45 0 0 0 0 .3 0 0 0 .55 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>"); }
+  #dot { position: fixed; left: 50%; top: 50%; width: 5px; height: 5px; margin: -2.5px; border-radius: 50%; background: #1f3a68; opacity: .7; }
+  #prompt { position: fixed; left: 50%; top: 58%; transform: translateX(-50%); color: #1f3a68; background: #efe4ccdd; border: 1px solid #1f3a68; padding: 4px 12px; font-size: 15px; display: none; }
+  #intro { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; background: #efe4cce6; color: #1f3a68; cursor: pointer; text-align: center; }
+  #intro h1 { font-size: 48px; margin: 0; letter-spacing: .1em; }
+  #intro p { margin: 6px; }
+  #intro .box { border: 2px solid #1f3a68; padding: 28px 44px; background: #f4ecd8; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="paper"></div>
+<div id="dot"></div>
+<div id="prompt"></div>
+<div id="intro"><div class="box">
+  <h1>居間</h1>
+  <p><i>Ima — a living room, Edo Japan, 1830s</i></p>
+  <p>WASD move · Mouse look · E interact · Esc release</p>
+  <p><b>Click to enter</b></p>
+</div></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+
+// Ukiyo-e palette (sampled from Hokusai's Great Wave)
+const C = {
+  paper: 0xefe4cc, prussian: 0x1f3a68, indigo: 0x27457a, pale: 0xa9c4d6,
+  ink: 0x1b2233, wood: 0x6b4a30, darkWood: 0x3d2a1c, plaster: 0xd6bf95,
+  tatami: 0xd2c88f, heri: 0x2b2f3a, salmon: 0xe2b48c, blossom: 0xe9a7a0,
+};
+const W = 2.7, D = 1.8, H = 2.4, KAMOI = 1.8; // half-width, half-depth, ceiling, lintel
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(C.paper);
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 50);
+camera.position.set(0.6, 1.55, 1.0);
+camera.lookAt(-1.8, 1.2, -2);
+
+scene.add(new THREE.HemisphereLight(0xfff4e0, 0x8a7a60, 1.6));
+const sun = new THREE.DirectionalLight(0xfff1d6, 1.8);
+sun.position.set(1, 4, 6); // daylight through the shoji
+scene.add(sun);
+
+// Flat 3-step shading + ink outlines = woodblock look
+const grad = new THREE.DataTexture(new Uint8Array([90, 170, 255]), 3, 1, THREE.RedFormat);
+grad.minFilter = grad.magFilter = THREE.NearestFilter;
+grad.needsUpdate = true;
+const mats = {};
+const toon = c => mats[c] ??= new THREE.MeshToonMaterial({ color: c, gradientMap: grad });
+const inkLine = new THREE.LineBasicMaterial({ color: C.ink });
+function ink(mesh) { mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry, 25), inkLine)); return mesh; }
+function box(w, h, d, color, x, y, z, parent = scene, outline = true) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), typeof color === 'number' ? toon(color) : color);
+  m.position.set(x, y, z);
+  parent.add(outline ? ink(m) : m);
+  return m;
+}
+function cyl(rt, rb, h, color, x, y, z, seg = 16) {
+  const m = ink(new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, seg), toon(color)));
+  m.position.set(x, y, z);
+  scene.add(m);
+  return m;
+}
+function cropUV(geo, u0, u1, v0, v1) {
+  const uv = geo.attributes.uv;
+  for (let i = 0; i < uv.count; i++) uv.setXY(i, u0 + uv.getX(i) * (u1 - u0), v0 + uv.getY(i) * (v1 - v0));
+  return geo;
+}
+
+// ponytail: needs http (python3 -m http.server) — browsers block file:// images in WebGL
+const wave = new THREE.TextureLoader().load('../references/1_ukiyoe_great_wave.jpg');
+wave.colorSpace = THREE.SRGBColorSpace;
+
+// Seigaiha (wave-scale) pattern for the fusuma, drawn on a canvas
+function seigaiha() {
+  const cv = document.createElement('canvas'); cv.width = cv.height = 256;
+  const g = cv.getContext('2d'), r = 32;
+  g.fillStyle = '#e9dfc6'; g.fillRect(0, 0, 256, 256);
+  for (let y = -r, row = 0; y <= 256 + r; y += r / 2, row++)
+    for (let x = (row % 2) * r; x <= 256 + r; x += 2 * r)
+      [[1, '#1f3a68'], [.8, '#e9dfc6'], [.62, '#a9c4d6'], [.44, '#e9dfc6'], [.26, '#1f3a68']].forEach(([k, c]) => {
+        g.fillStyle = c; g.beginPath(); g.arc(x, y, r * k, 0, Math.PI * 2); g.fill();
+      });
+  const t = new THREE.CanvasTexture(cv);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(1, 2); t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+// ---------- Floor: 12 tatami with dark heri borders ----------
+for (let r = 0; r < 4; r++) for (let c = 0; c < 3; c++) {
+  const x = -1.8 + c * 1.8, z = -1.35 + r * 0.9;
+  box(1.78, 0.06, 0.88, C.tatami, x, 0.03, z);
+  box(1.78, 0.062, 0.04, C.heri, x, 0.031, z - 0.42, scene, false);
+  box(1.78, 0.062, 0.04, C.heri, x, 0.031, z + 0.42, scene, false);
+}
+
+// ---------- Ceiling: boards + battens ----------
+box(2 * W, 0.04, 2 * D, C.wood, 0, H, 0, scene, false);
+for (let x = -W + 0.45; x < W; x += 0.45) box(0.04, 0.04, 2 * D, C.darkWood, x, H - 0.04, 0, scene, false);
+
+// ---------- Structure: posts, lintels, plaster above lintels ----------
+for (const [x, z] of [[-W, -D], [W, -D], [-W, D], [W, D], [-0.9, -D], [W, 0], [-W, 0]])
+  box(0.12, H, 0.12, C.wood, x, H / 2, z);
+box(2 * W, 0.08, 0.1, C.wood, 0, KAMOI, D);    // south kamoi
+box(0.1, 0.08, 2 * D, C.wood, W, KAMOI, 0);    // east kamoi
+box(2 * W, 0.6, 0.05, C.plaster, 0, KAMOI + 0.3, D + 0.03);
+box(0.05, 0.6, 2 * D, C.plaster, W + 0.03, KAMOI + 0.3, 0);
+
+// North: plaster wall + tokonoma alcove (x -2.7..-0.9, recessed 0.7)
+box(3.6, H, 0.05, C.plaster, 0.9, H / 2, -D - 0.03);
+box(1.8, 0.45, 0.05, C.plaster, -1.8, 2.175, -D - 0.03);
+box(1.8, 0.08, 0.1, C.darkWood, -1.8, 1.95, -D);                // otoshigake beam
+box(1.8, H, 0.05, C.plaster, -1.8, H / 2, -D - 0.73);           // alcove back
+box(0.05, H, 0.7, C.plaster, -W - 0.03, H / 2, -D - 0.35);      // alcove side
+box(1.8, 0.12, 0.7, C.darkWood, -1.8, 0.06, -D - 0.35);         // toko-ita raised floor
+box(1.8, 0.04, 0.7, C.wood, -1.8, H, -D - 0.35, scene, false);  // alcove ceiling
+
+// Kakejiku hanging scroll: crop of the wave + Fuji
+const scrollGeo = cropUV(new THREE.PlaneGeometry(0.5, 1.2), 0.53, 0.73, 0.06, 0.84);
+const scroll = ink(new THREE.Mesh(scrollGeo, new THREE.MeshBasicMaterial({ map: wave })));
+scroll.position.set(-1.8, 1.2, -D - 0.7);
+scene.add(scroll);
+box(0.6, 0.15, 0.01, C.salmon, -1.8, 1.875, -D - 0.7);          // mounting
+box(0.6, 0.08, 0.01, C.salmon, -1.8, 0.56, -D - 0.7);
+box(0.66, 0.03, 0.03, C.darkWood, -1.8, 0.52, -D - 0.68);       // bottom rod
+
+// Ikebana: vase + bare branch + blossoms
+cyl(0.07, 0.1, 0.28, C.prussian, -1.25, 0.26, -2.25);
+for (const [len, rx, rz] of [[0.6, 0.3, 0.1], [0.45, -0.5, -0.2], [0.35, 0.1, 0.6]]) {
+  const b = cyl(0.008, 0.012, len, C.darkWood, -1.25, 0.38, -2.25, 5);
+  b.geometry.translate(0, len / 2, 0); // pivot at the vase mouth
+  b.children[0].geometry.translate(0, len / 2, 0);
+  b.rotation.set(rx, 0, rz);
+  for (let i = 1; i <= 3; i++) {
+    const s = new THREE.Mesh(new THREE.SphereGeometry(0.025, 8, 6), toon(C.blossom));
+    s.position.set(0.02, (i / 3) * len, 0);
+    b.add(s);
+  }
+}
+
+// West: plaster wall
+box(0.05, H, 2 * D, C.plaster, -W - 0.03, H / 2, 0);
+
+// East: four fusuma painted with seigaiha
+const seig = new THREE.MeshToonMaterial({ map: seigaiha(), gradientMap: grad });
+for (let i = 0; i < 4; i++) {
+  const z = -1.35 + i * 0.9;
+  box(0.03, KAMOI - 0.02, 0.88, seig, W - 0.02, KAMOI / 2, z);
+  box(0.035, 0.03, 0.06, C.ink, W - 0.03, 0.85, z + (i % 2 ? -0.36 : 0.36), scene, false); // hikite pull
+}
+
+// ---------- South: four sliding shoji, daylight + the sea beyond ----------
+const shoji = [], interact = [];
+const paperMat = new THREE.MeshBasicMaterial({ color: 0xf6eedb, side: THREE.DoubleSide });
+for (let i = 0; i < 4; i++) {
+  const g = new THREE.Group(), w = 1.35, h = KAMOI - 0.02;
+  const x = -2.025 + i * w, track = (i === 1 || i === 2) ? D - 0.04 : D + 0.02;
+  g.position.set(x, 0.06, track);
+  g.userData = { closedX: x, openX: i === 1 ? x - w : i === 2 ? x + w : x };
+  const paper = new THREE.Mesh(new THREE.PlaneGeometry(w - 0.06, h - 0.06), paperMat);
+  paper.position.y = h / 2; paper.userData.label = 'E — slide the shoji';
+  g.add(paper); interact.push(paper);
+  for (const [bw, bh, bx, by] of [[w, 0.05, 0, 0.025], [w, 0.04, 0, h - 0.02], [0.04, h, -w / 2 + 0.02, h / 2], [0.04, h, w / 2 - 0.02, h / 2]])
+    box(bw, bh, 0.04, C.wood, bx, by, 0, g);
+  for (let k = 1; k < 4; k++) box(0.015, h, 0.02, C.wood, -w / 2 + k * w / 4, h / 2, 0, g, false);  // kumiko
+  for (let k = 1; k < 8; k++) box(w, 0.015, 0.02, C.wood, 0, k * h / 8, 0, g, false);
+  scene.add(g); shoji.push(g);
+}
+let shojiOpen = false;
+
+// Engawa veranda + eave, then the Great Wave as the world outside
+box(5.8, 0.06, 0.9, C.wood, 0, 0.03, D + 0.47);
+for (let x = -2.8; x < 2.9; x += 0.2) box(0.01, 0.062, 0.9, C.darkWood, x, 0.031, D + 0.47, scene, false);
+box(6, 0.04, 1.2, C.darkWood, 0, H, D + 0.6);
+box(0.12, H, 0.12, C.wood, -2.85, H / 2, D + 0.88);
+box(0.12, H, 0.12, C.wood, 2.85, H / 2, D + 0.88);
+const sea = new THREE.Mesh(new THREE.PlaneGeometry(20, 13.4), new THREE.MeshBasicMaterial({ map: wave }));
+sea.position.set(0, 1.5, 10); sea.rotation.y = Math.PI;
+scene.add(sea);
+
+// ---------- Furniture ----------
+// Low table with tea set
+box(1.0, 0.05, 0.7, C.darkWood, 0, 0.33, 0);
+for (const [x, z] of [[-0.43, -0.28], [0.43, -0.28], [-0.43, 0.28], [0.43, 0.28]]) box(0.05, 0.28, 0.05, C.darkWood, x, 0.2, z);
+const pot = ink(new THREE.Mesh(new THREE.SphereGeometry(0.07, 14, 10), toon(C.prussian)));
+pot.scale.y = 0.8; pot.position.set(-0.15, 0.41, 0); scene.add(pot);
+cyl(0.01, 0.015, 0.08, C.prussian, -0.07, 0.42, 0).rotation.z = -1;
+for (const [x, z] of [[0.15, -0.15], [0.25, 0.12]]) cyl(0.035, 0.028, 0.06, C.pale, x, 0.385, z);
+// Zabuton cushions
+box(0.55, 0.07, 0.55, C.indigo, 0, 0.095, -0.7);
+box(0.55, 0.07, 0.55, C.indigo, 0, 0.095, 0.7);
+// Hibachi brazier with kettle
+cyl(0.25, 0.22, 0.35, C.wood, 1.6, 0.235, -0.9, 20);
+cyl(0.22, 0.22, 0.01, 0x9a9488, 1.6, 0.41, -0.9, 20);
+const kettle = ink(new THREE.Mesh(new THREE.SphereGeometry(0.11, 14, 10), toon(C.ink)));
+kettle.scale.y = 0.75; kettle.position.set(1.6, 0.48, -0.9); scene.add(kettle);
+// Andon paper lantern
+const andonPaper = new THREE.MeshBasicMaterial({ color: 0xffe2a8 });
+for (const [x, z] of [[-0.14, -0.14], [0.14, -0.14], [-0.14, 0.14], [0.14, 0.14]]) box(0.03, 0.8, 0.03, C.darkWood, -2.2 + x, 0.46, 1.2 + z);
+const andon = box(0.26, 0.4, 0.26, andonPaper, -2.2, 0.6, 1.2);
+andon.userData.label = 'E — light / snuff the andon';
+interact.push(andon);
+const lamp = new THREE.PointLight(0xffb060, 1.2, 3, 2);
+lamp.position.set(-2.2, 0.6, 1.2); scene.add(lamp);
+
+// ---------- Controls ----------
+const controls = new PointerLockControls(camera, document.body);
+const intro = document.getElementById('intro'), prompt = document.getElementById('prompt');
+intro.onclick = () => controls.lock();
+controls.addEventListener('lock', () => intro.style.display = 'none');
+controls.addEventListener('unlock', () => { intro.style.display = 'flex'; prompt.style.display = 'none'; });
+
+const keys = {};
+addEventListener('keydown', e => { keys[e.code] = true; if (e.code === 'KeyE') use(); });
+addEventListener('keyup', e => keys[e.code] = false);
+
+const ray = new THREE.Raycaster(); ray.far = 2.5;
+let target = null;
+function use() {
+  if (!target || !controls.isLocked) return;
+  if (target === andon) {
+    lamp.visible = !lamp.visible;
+    andonPaper.color.set(lamp.visible ? 0xffe2a8 : 0xd8ccb0);
+  } else if (camera.position.z < D - 0.25) { // don't shut yourself out on the engawa
+    shojiOpen = !shojiOpen;
+  }
+}
+
+const obstacles = [[0, 0, 0.75], [1.6, -0.9, 0.42], [-2.2, 1.2, 0.32]]; // x, z, radius
+function collide(p) {
+  p.x = THREE.MathUtils.clamp(p.x, -W + 0.25, W - 0.25);
+  p.z = THREE.MathUtils.clamp(p.z, -D + 0.25, shojiOpen ? D + 0.75 : D - 0.25);
+  if (p.z > D - 0.25) p.x = THREE.MathUtils.clamp(p.x, -1.15, 1.15); // through the opened doorway
+  for (const [ox, oz, r] of obstacles) {
+    const dx = p.x - ox, dz = p.z - oz, d = Math.hypot(dx, dz);
+    if (d < r) { p.x = ox + dx / d * r; p.z = oz + dz / d * r; }
+  }
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  if (controls.isLocked) {
+    let f = (keys.KeyW || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0);
+    let r = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+    const n = Math.hypot(f, r) || 1, sp = 1.8 * dt / n;
+    controls.moveForward(f * sp); controls.moveRight(r * sp);
+    collide(camera.position);
+
+    ray.setFromCamera({ x: 0, y: 0 }, camera);
+    target = ray.intersectObjects(interact, false)[0]?.object ?? null;
+    prompt.style.display = target ? 'block' : 'none';
+    if (target) prompt.textContent = target.userData.label;
+  }
+  for (const g of shoji) {
+    const t = shojiOpen ? g.userData.openX : g.userData.closedX;
+    g.position.x += (t - g.position.x) * Math.min(1, dt * 6);
+  }
+  lamp.intensity = lamp.visible ? 1.2 + Math.sin(clock.elapsedTime * 13) * 0.08 : 0; // flame flicker
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>

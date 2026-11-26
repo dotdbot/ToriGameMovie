@@ -233,8 +233,9 @@ canvas.addEventListener('click', (e) => {
 
 function handleUIClick(mx, my) {
   const bw = 50, bh = 22;
-  const bx = canvas.width - 130 - 10;
-  const by = 60;
+  const totalW = bw * 2 + 6 + 4 + 36;
+  const bx = canvas.width - 10 - totalW;
+  const by = 10 + 90 + 8; // minimap mmY + mmH + gap
 
   if (showSaveLoad) {
     // Panel dimensions
@@ -1506,10 +1507,11 @@ function drawUI() {
 }
 
 function drawSaveLoadButtons() {
-  // Small save & load buttons in top-right area below minimap
+  // Small save & load buttons in top-right area, below the minimap
   const bw = 50, bh = 22;
-  const bx = canvas.width - 130 - 10;
-  const by = 60;
+  const totalW = bw * 2 + 6 + 4 + 36;
+  const bx = canvas.width - 10 - totalW;
+  const by = 10 + 90 + 8; // minimap mmY + mmH + gap
 
   // Save button
   ctx.fillStyle = 'rgba(0, 80, 0, 0.6)';
